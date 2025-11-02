@@ -1,0 +1,560 @@
+import os
+import random
+
+import sys
+import time
+import threading
+import pygame
+import winreg
+from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QListWidget, QLabel, QFileDialog, QMessageBox, QProgressBar, QGraphicsDropShadowEffect
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer
+from PyQt5.QtGui import QColor
+import keyboard
+from my_window_effect import WindowEffect
+c=0
+class MusicPlayer(QWidget):
+    # 自定义信号，用于更新进度条和时间显示
+    progress_update_signal = pyqtSignal(int, int)
+
+    def __init__(self):
+        super().__init__()
+        pygame.mixer.init()
+        
+        # 设置窗口透明相关属性
+        self.setAttribute(Qt.WA_TranslucentBackground)  # 启用窗口透明
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)  # 无边框和置顶
+        
+        # 设置窗口位置到左上角
+        self.setGeometry(0, 0, 400, 600)  # 修改初始位置
+        
+        self.init_ui()
+        self.playlist = []
+        self.current_index = 0
+        self.is_playing = False
+        self.music_long = 0
+        self.quit_flag = 0
+        self.show_flag = 1  # 初始化为显示状态
+        
+        # 设置窗口效果 - 移到前面
+        self.windowEffect = WindowEffect()
+        self.setAttribute(Qt.WA_NoSystemBackground)
+        
+        # 更新UI主题
+        self.update_ui_theme()
+        
+        self.load_music_playlist()
+        self.start_music_thread()
+        keyboard.on_press(self.key_event_handler)
+        
+        self.refresh_timer = QTimer()
+        self.refresh_timer.timeout.connect(self.refresh_ui)
+        self.refresh_timer.start(100)
+        
+        # 显示窗口
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.start_progress_update()
+
+    def init_ui(self):
+        self.setWindowTitle("音乐播放器")
+        self.resize(500, 230)
+        self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)  # 添加无框窗口效果
+
+        main_layout = QVBoxLayout(self)
+
+        self.list_widget = QListWidget(self)
+        self.list_widget.itemClicked.connect(self.play_selected_song)
+        main_layout.addWidget(self.list_widget)
+
+        button_layout = QHBoxLayout()
+
+        self.play_button = QPushButton("Play", self)
+        self.play_button.clicked.connect(self.toggle_play_pause)
+        button_layout.addWidget(self.play_button)
+
+        self.hide_show_button = QPushButton("显示/隐藏", self)
+        self.hide_show_button.clicked.connect(self.hide_show_window)
+        button_layout.addWidget(self.hide_show_button)
+
+        main_layout.addLayout(button_layout)
+
+        progress_layout = QHBoxLayout()
+
+        self.now_time_label = QLabel("00:00", self)
+        self.now_time_label.setStyleSheet("color: white; font-weight: bold;")
+        # 添加阴影效果
+        shadow1 = QGraphicsDropShadowEffect()
+        shadow1.setBlurRadius(10)
+        shadow1.setXOffset(2)
+        shadow1.setYOffset(2)
+        shadow1.setColor(QColor(0, 0, 0, 180))
+        self.now_time_label.setGraphicsEffect(shadow1)
+        progress_layout.addWidget(self.now_time_label)
+
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setFixedWidth(400)
+        self.progress_bar.setTextVisible(False)
+        # 允许进度条接收鼠标点击事件
+        self.progress_bar.mousePressEvent = self.progress_bar_clicked
+        progress_layout.addWidget(self.progress_bar)
+
+        self.total_time_label = QLabel("00:00", self)
+        self.total_time_label.setStyleSheet("color: white; font-weight: bold;")
+        # 添加阴影效果
+        shadow2 = QGraphicsDropShadowEffect()
+        shadow2.setBlurRadius(10)
+        shadow2.setXOffset(2)
+        shadow2.setYOffset(2)
+        shadow2.setColor(QColor(0, 0, 0, 180))
+        self.total_time_label.setGraphicsEffect(shadow2)
+        progress_layout.addWidget(self.total_time_label)
+
+        main_layout.addLayout(progress_layout)
+
+        self.setLayout(main_layout)
+
+    def update_ui_theme(self):
+        is_dark = self.is_darkmode()
+        if is_dark:
+            bg_color = "rgba(40, 40, 40, 100)"  # 深色模式下的淡灰色，透明度200/255
+            text_color = "rgba(255, 255, 255, 230)"
+            scroll_bg = "rgba(40, 40, 40, 150)"
+            scroll_handle = "rgba(100, 100, 100, 150)"
+            scroll_handle_hover = "rgba(120, 120, 120, 180)"
+            # 设置深色模式下的亚克力效果
+            self.windowEffect.setAcrylicEffect(int(self.winId()), gradientColor="404040A0")  # E6 = 230透明度
+        else:
+            bg_color = "rgba(255, 255, 255, 100)"  # 浅色模式下的淡白色，透明度200/255
+            text_color = "rgba(0, 0, 0, 230)"
+            scroll_bg = "rgba(240, 240, 240, 250)"
+            scroll_handle = "rgba(200, 200, 200, 150)"
+            scroll_handle_hover = "rgba(180, 180, 180, 180)"
+            # 设置浅色模式下的亚克力效果
+            self.windowEffect.setAcrylicEffect(int(self.winId()), gradientColor="FFFFFFA0")  # E6 = 230透明度
+        # 获取 Windows 主题色
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Accent")
+            accent_data = winreg.QueryValueEx(key, "AccentColorMenu")[0]
+            # 转换为 RGB 格式
+            r = max(0, min(255, accent_data & 0xFF))
+            g = max(0, min(255, (accent_data >> 8) & 0xFF))
+            b = max(0, min(255, (accent_data >> 16) & 0xFF))
+            theme_color = f"rgba({r}, {g}, {b}, 150)"
+            if is_dark:
+                r2 = max(0, min(255, (accent_data & 0xFF) - 100))
+                g2 = max(0, min(255, ((accent_data >> 8) & 0xFF) - 100))
+                b2 = max(0, min(255, ((accent_data >> 16) & 0xFF) - 100))
+                theme_color2 = f"rgba({r2}, {g2}, {b2}, 150)"
+            else:
+                r2 = max(0, min(255, (accent_data & 0xFF) + 100))
+                g2 = max(0, min(255, ((accent_data >> 8) & 0xFF) + 100))
+                b2 = max(0, min(255, ((accent_data >> 16) & 0xFF) + 100))
+                theme_color2 = f"rgba({r2}, {g2}, {b2}, 150)"
+        except:
+            # 如果获取失败，使用默认蓝色
+            theme_color = "rgba(100, 150, 255, 150)"
+            theme_color2="rgba(120,150,255,150)"
+        print(theme_color[0],theme_color[1],theme_color[2],9999)
+        # 全局字体样式
+        base_style = f"""
+            * {{
+                font-family: "Microsoft YaHei", "微软雅黑";
+            }}
+        """
+        # 列表样式
+        self.list_widget.setStyleSheet(f"""
+            QListWidget {{
+                background-color: {bg_color};
+                color: {text_color};
+                border: none;
+                border-radius: 5px;
+                font-family: ""Microsoft YaHei", "微软雅黑"";
+                font-size: 12px;
+            }}
+            QListWidget::item:selected {{
+                background-color: qlineargradient(x1:0, y1:0 , x2:1 ,y2:0 stop:0 {theme_color} ,stop:1 {theme_color2});
+                color:{text_color};
+            }}
+            QListWidget::item:hover {{
+                background-color: rgba(80, 80, 80, 80);
+            }}
+        """)
+        scroll_style = f"""
+            QScrollBar:vertical {{
+                background: {scroll_bg};
+                width: 8px;
+                margin: 0px;
+                border-radius: 4px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {scroll_handle};
+                min-height: 20px;
+                border-radius: 4px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {scroll_handle_hover};
+            }}
+            QScrollBar::add-line:vertical {{
+                height: 0px;
+            }}
+            QScrollBar::sub-line:vertical {{
+                height: 0px;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: none;
+            }}
+            /* 水平滚动条 */
+            QScrollBar:horizontal {{
+                background: {scroll_bg};
+                height: 8px;
+                margin: 0px;
+                border-radius: 4px;
+            }}
+            QScrollBar::handle:horizontal {{
+                background: {scroll_handle};
+                min-width: 20px;
+                border-radius: 4px;
+            }}
+            QScrollBar::handle:horizontal:hover {{
+                background: {scroll_handle_hover};
+            }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+                width: 0px;
+            }}
+
+            /* 通用设置 */
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical,
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+                background: none;
+            }}
+        """
+        self.list_widget.setStyleSheet(self.list_widget.styleSheet() + scroll_style)
+        
+        # 按钮样式
+        button_style = f"""
+            QPushButton {{
+                background-color: {bg_color};
+                color: {text_color};
+                border: none;
+                border-radius: 3px;
+                padding: 5px;
+                font-family: "Microsoft YaHei", "微软雅黑";
+                font-size: 12px;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(120, 120, 120, 150);
+            }}
+        """
+        self.play_button.setStyleSheet(button_style)
+        self.hide_show_button.setStyleSheet(button_style)
+
+        # 标签样式
+        label_style = f"""
+            QLabel {{
+                color: {text_color};
+                background: transparent;
+                font-family: "Microsoft YaHei", "微软雅黑";
+                font-size: 12px;
+            }}
+        """
+        self.now_time_label.setStyleSheet(label_style)
+        self.total_time_label.setStyleSheet(label_style)
+
+        
+
+        # 进度条样式
+        self.progress_bar.setStyleSheet(f"""
+            QProgressBar {{
+                background-color: rgba(100, 100, 100, 120);
+                border: none;
+                border-radius: 10px;
+                font-family: "Microsoft YaHei", "微软雅黑";
+                font-size: 12px;
+            }}
+            QProgressBar::chunk {{
+                background-color: {theme_color};
+                border-radius: 10px;
+            }}
+        """)
+
+        # 应用全局样式
+        self.setStyleSheet(base_style)
+
+    def is_darkmode(self):
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+            d, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            winreg.CloseKey(key)
+            return d == 0
+        except FileNotFoundError:
+            return False
+
+    def load_music_playlist(self):
+        config_path = "config.ini"
+        if not os.path.exists(config_path):
+            music_path = QFileDialog.getExistingDirectory(self, "请选择音乐文件夹（第一次启动配置）")
+            with open(config_path, 'w') as file:
+                file.write(music_path)
+        with open(config_path, 'r') as f:
+            playpath = f.read()
+        try:
+            # 创建包含文件名和创建时间的列表
+            music_files = []
+            for name in os.listdir(playpath):
+                parts = name.split('.')
+                if len(parts) > 1 and (parts[-1] == "mp3" or parts[-1] == "wav"):
+                    file_path = os.path.join(playpath, name)
+                    creation_time = os.path.getctime(file_path)
+                    music_files.append((name, creation_time))
+            
+            # 按创建时间倒序排序
+            music_files.sort(key=lambda x: x[1], reverse=True)
+            # 只保留文件名
+            self.playlist = [file[0] for file in music_files]
+            
+        except FileNotFoundError:
+            QMessageBox.warning(self, "警告", "路径不存在")
+            music_path = QFileDialog.getExistingDirectory(self, "请选择音乐文件夹")
+            with open(config_path, 'w') as file:
+                file.write(music_path)
+            for name in os.listdir(music_path):
+                parts = name.split('.')
+                if len(parts) > 1 and (parts[-1] == "mp3" or parts[-1] == "wav"):
+                    self.playlist.append(name)
+        self.update_list_widget()
+        # 设置当前索引为0（第一首歌）并播放
+        self.current_index = 0
+        self.play_music()
+
+    def update_list_widget(self):
+        self.list_widget.clear()
+        for index, song in enumerate(self.playlist, 1):
+            song_name = os.path.basename(song)
+            if len(song_name)>=60:
+                song_name=song_name[0:60]+"..."
+            display_text = f" {song_name}"
+            self.list_widget.addItem(display_text)
+
+    def play_selected_song(self):
+        global c
+        try:
+            c=0
+            selected_items = self.list_widget.selectedItems()
+            if selected_items:
+                selected_index = self.list_widget.row(selected_items[0])
+                self.current_index = selected_index
+                self.play_music()
+        except Exception as e:
+            print(f"选择歌曲错误: {str(e)}")
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Warning)
+            msg_box.setWindowTitle("错误")
+            msg_box.setText("选择歌曲时发生错误")
+            msg_box.setStandardButtons(QMessageBox.Ok)
+            msg_box.setModal(True)
+            msg_box.exec_()
+
+    def play_music(self):
+        try:
+            if 0 <= self.current_index < len(self.playlist):
+                music_folder = self.get_playpath()
+                current_song = os.path.join(music_folder, self.playlist[self.current_index])
+                print(f"正在播放: {current_song}")
+                
+                if pygame.mixer.music.get_busy():
+                    pygame.mixer.music.stop()
+                
+                pygame.mixer.music.load(current_song)
+                pygame.mixer.music.play()
+                self.is_playing = True
+                self.play_button.setText("播放/暂停")
+                self.list_widget.setCurrentRow(self.current_index)
+                
+                # 重置乐时长，让refresh_ui重新计算
+                self.music_long = 0
+                
+        except Exception as e:
+            print(f"播放错误: {str(e)}")
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Warning)
+            msg_box.setWindowTitle("错误")
+            msg_box.setText(f"无法播放当前歌曲: {str(e)}")
+            msg_box.setStandardButtons(QMessageBox.Ok)
+            msg_box.setModal(True)
+            msg_box.exec_()
+
+    def get_playpath(self):
+        with open('config.ini', 'r') as f:
+            return f.read()
+
+    def toggle_play_pause(self):
+        if self.is_playing:
+            pygame.mixer.music.pause()
+            self.is_playing = False
+        else:
+            pygame.mixer.music.unpause()
+            self.is_playing = True
+
+    def prev_song(self):
+        global c
+        c=0
+        self.current_index = (self.current_index - 1) % len(self.playlist)
+        self.play_music()
+
+    def next_song(self):
+        global c
+        c=0
+        self.current_index = (self.current_index + 1) % len(self.playlist)
+        self.play_music()
+
+    def hide_show_window(self):
+        print("[info] 更换显示状态中")
+        if self.show_flag == 0:
+            self.show()
+            self.show_flag = 1
+        else:
+            self.hide()
+            self.show_flag = 0
+
+    def start_progress_update(self):
+        update_thread = threading.Thread(target=self.update_progress)
+        update_thread.start()
+
+    def update_progress(self):
+        global c
+        
+        while self.is_playing:
+            
+            current_pos = pygame.mixer.music.get_pos()
+            self.progress_update_signal.emit(current_pos, self.music_long)
+            if self.quit_flag==1:
+                break
+            if not pygame.mixer.music.get_busy():
+                c=0
+                # 当一首歌曲播放完毕，自动播放下一首
+                self.current_index = (self.current_index + 1) % len(self.playlist)
+                self.play_music()
+            time.sleep(0.1)
+        
+
+    def key_event_handler(self,event):
+            if keyboard.is_pressed('ctrl+alt+>'):
+                self.next_song()
+                time.sleep(0.5)
+            elif keyboard.is_pressed('ctrl+alt+<'):
+                self.prev_song()
+                time.sleep(0.5)
+            elif keyboard.is_pressed('ctrl+alt+/'):
+                self.toggle_play_pause()
+                time.sleep(0.5)
+            elif keyboard.is_pressed('ctrl+alt+x') or self.quit_flag == 1:
+                pygame.mixer.music.stop()
+                self.close()
+            elif keyboard.is_pressed('ctrl+alt+l'):
+                print("[info] 正在切换显示状态")
+                self.hide_show_window()
+                time.sleep(0.5)
+            print("[info] 正在监听按键")
+            return True
+
+
+    def start_music_thread(self):
+        music_thread = threading.Thread(target=self.control_music)
+        music_thread.start()
+
+    def control_music(self):
+        print("[info] 按键监听线程已启动")
+        key_thread = threading.Thread(target=self.key_event_handler)
+        key_thread.start()
+        self.play_music()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            # 检查鼠标点击的位置是否在子控件上
+            child = self.childAt(event.pos())
+            if not child:  # 只有当点击的不是子控件时才允许拖动
+                self.drag_position = event.globalPos() - self.frameGeometry().topLeft()
+                event.accept()
+
+    def mouseMoveEvent(self, event):
+        if hasattr(self, 'drag_position') and event.buttons() == Qt.LeftButton:
+            self.move(event.globalPos() - self.drag_position)
+            event.accept()
+
+    def refresh_ui(self):
+        global c
+        """刷新UI控件"""
+        try:
+            print("[info] UI刷新中")
+            if self.is_playing and pygame.mixer.music.get_busy():
+                a=pygame.mixer.music.get_pos()
+                current_pos = a+c
+                if current_pos > 0:
+                    # 更新当前时间
+                    minutes = current_pos // 60000
+                    seconds = (current_pos % 60000) // 1000
+                    self.now_time_label.setText(f"{minutes:02d}:{seconds:02d}")
+                    
+                    # 更新进度条
+                    self.progress_bar.setValue(current_pos)
+                    
+                    # 如果是新歌曲，更新总时长
+                    if self.music_long == 0:
+                        try:
+                            music_folder = self.get_playpath()
+                            current_song = os.path.join(music_folder, self.playlist[self.current_index])
+                            audio = pygame.mixer.Sound(current_song)
+                            self.music_long = int(audio.get_length() * 1000)
+                            
+                            # 更新总时长显示
+                            total_minutes = self.music_long // 60000
+                            total_seconds = (self.music_long % 60000) // 1000
+                            self.total_time_label.setText(f"{total_minutes:02d}:{total_seconds:02d}")
+                            self.progress_bar.setMaximum(self.music_long)
+                        except Exception as e:
+                            print(f"[warn] 获取音乐时长失败: {str(e)}")
+            
+            # 强制更新标签显示
+            self.now_time_label.update()
+            self.total_time_label.update()
+            self.progress_bar.update()
+            
+        except Exception as e:
+            print(f"[error] 刷新UI错误: {str(e)}")
+
+    def closeEvent(self, event):
+        """窗口关闭时清理资源"""
+        self.refresh_timer.stop()
+        self.quit_flag = 1
+        event.accept()
+
+    def progress_bar_clicked(self, event):
+        # 计算点击位置对应的音乐时间
+        global c
+        width = self.progress_bar.width()
+        x = event.x()
+        ratio = x / width
+        target_time = int(self.music_long * ratio)
+        c=target_time-pygame.mixer.music.get_pos()
+        try:
+            # 设置音乐播放位置（毫秒转换为秒）
+            pygame.mixer.music.set_pos((target_time) / 1000.0)
+            # 更新进度条位置
+            self.progress_bar.setValue(target_time+c)
+            
+            # 更新时间标签
+            minutes = target_time // 60000
+            seconds = (target_time % 60000) // 1000
+            self.now_time_label.setText(f"{minutes:02d}:{seconds:02d}")
+            print(self.progress_bar.maximum(),self.progress_bar.value(),target_time+c,c)
+            list_x=[self.list_widget.geometry().x(),self.list_widget.geometry().width()]
+            print(list_x)#打印列表x
+        except Exception as e:
+            print(f"设置播放位置失败: {str(e)}")
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    player = MusicPlayer()
+    player.show()
+    sys.exit(app.exec_())
