@@ -7,16 +7,28 @@ import winreg
 import re
 import bisect
 from PIL import Image, ImageFilter
+import numpy as np
 import io
+from io import BytesIO
+import json
+from pathlib import Path
 from PyQt5.QtWidgets import (QApplication, QLineEdit, QWidget, QCheckBox, 
                             QVBoxLayout, QHBoxLayout, QPushButton, QListWidget, 
                             QLabel, QFileDialog, QMessageBox, QProgressBar, 
-                            QGraphicsDropShadowEffect,)
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer
-from PyQt5.QtGui import QColor,QPixmap
+                            QGraphicsDropShadowEffect)
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QPoint, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
+from PyQt5.QtGui import QColor,QPixmap, QIcon
 import keyboard
 from AcrylicEffect import WindowEffect  
-from mutagen.id3 import ID3, USLT ,APIC
+from mutagen.id3 import ID3, USLT ,APIC,TIT2
+import winsdk.windows.media.playback as media_playback
+import winsdk.windows.media
+import winsdk.windows.storage.streams
+import winsdk.windows.foundation
+
+# 初始化 SMTC
+
+
 
 c=0
 
@@ -24,7 +36,7 @@ class MusicPlayer(QWidget):
     # 自定义信号，用于更新UI
     update_ui_signal = pyqtSignal(int, int)  # 当前时间(ms)，总时间(ms)
     progress_update_signal = pyqtSignal(int, int)
-
+    
     def __init__(self):
         super().__init__()
         pygame.mixer.init()
@@ -43,7 +55,15 @@ class MusicPlayer(QWidget):
         self.music_long = 0  # 总时长(ms)
         self.quit_flag = 0
         self.show_flag = 1  # 初始化为显示状态
-        
+        self._smtc_player = winsdk.windows.media.playback.MediaPlayer()
+        self._smtc = self._smtc_player.system_media_transport_controls
+        self._smtc.add_button_pressed(self._on_smtc_button_pressed)
+        self._smtc.is_play_enabled = True
+        self._smtc.is_pause_enabled = True
+        self._smtc.is_next_enabled = True
+        self._smtc.is_previous_enabled = True
+        self._smtc_updater = self._smtc.display_updater
+        self._smtc.playback_status = winsdk.windows.media.MediaPlaybackStatus.PLAYING
         # 主题相关属性
         self.bg_color = ""
         self.text_color = ""
@@ -53,7 +73,7 @@ class MusicPlayer(QWidget):
         self.theme_color = ""
         self.theme_color2 = ""
         self.is_dark = False
-        
+        self.setWindowIcon(QIcon("vacuum_music_player.ico"))
         # 设置窗口效果
         self.windowEffect = WindowEffect()
         self.setAttribute(Qt.WA_NoSystemBackground)
@@ -89,12 +109,30 @@ class MusicPlayer(QWidget):
         
         # 新增搜索窗口相关
         self.search_window = None
-         
+    def _on_smtc_button_pressed(self,sender, args):
+        """SMTC 按钮点击的回调函数"""
+        # 获取点击的按钮类型（来自 media.MediaPlaybackControlButton 枚举）
+        button_type = args.button
+        print(button_type)
+        
+        if button_type == winsdk.windows.media.SystemMediaTransportControlsButton.PLAY:
+            self._smtc.playback_status =  winsdk.windows.media.MediaPlaybackStatus.PLAYING
+            self.toggle_play_pause()
+    
+        elif button_type == winsdk.windows.media.SystemMediaTransportControlsButton.PAUSE:
+            self._smtc.playback_status =  winsdk.windows.media.MediaPlaybackStatus.PAUSED
+            self.toggle_play_pause()
+        
+        elif button_type == winsdk.windows.media.SystemMediaTransportControlsButton.PREVIOUS:
+            self.prev_song()
+        
+        elif button_type == winsdk.windows.media.SystemMediaTransportControlsButton.NEXT:
+            self.next_song()
     def quit_musicplayer(self):
         self.quit_flag = 1
         pygame.mixer.music.stop()
         self.close()
-        
+    
     def init_ui(self):
         self.setWindowTitle("音乐播放器")
         
@@ -133,7 +171,7 @@ class MusicPlayer(QWidget):
 
         self.lyric_view = QListWidget(self)
         _main_layout.addWidget(self.lyric_view)
-        
+    
         progress_layout = QHBoxLayout()
 
 
@@ -169,7 +207,30 @@ class MusicPlayer(QWidget):
         main_layout.addLayout(progress_layout)
 
         self.setLayout(main_layout)
+    def update_smtc(self, song_name, artist, cover_bytes):
+        self._smtc_updater.type = winsdk.windows.media.MediaPlaybackType.MUSIC
+        self._smtc_updater.music_properties.title = song_name
+        self._smtc_updater.music_properties.artist = artist
+        
 
+        # 封面处理
+        if cover_bytes:
+            try:
+                # 从原始字节创建PIL图片
+                img = Image.open(io.BytesIO(cover_bytes))  # 关键：用BytesIO包装字节
+                byte_stream = io.BytesIO()
+                img.save(byte_stream, format="JPEG")  # 转换为JPEG字节流
+                image_bytes = byte_stream.getvalue()
+                
+                # 转换为SMTC可识别的流对象
+                stream = winsdk.windows.storage.streams.InMemoryRandomAccessStream()
+                writer = winsdk.windows.storage.streams.DataWriter(stream)
+                writer.write_bytes(image_bytes)
+                writer.store_async().get_results()  # 同步写入
+                self._smtc_updater.thumbnail = winsdk.windows.storage.streams.RandomAccessStreamReference.create_from_stream(stream)
+            except Exception as e:
+                print(f"封面处理失败：{e}")
+        self._smtc_updater.update()
     def update_ui_theme(self):
         self.is_dark = self.is_darkmode()
         if self.is_dark:
@@ -394,7 +455,8 @@ class MusicPlayer(QWidget):
                 creation_time = os.path.getctime(file_path)
                 music_files.append((name, creation_time))
             if len(parts) > 1 and (parts[-1].lower() == "lrc" ):
-                lyric_files.append((parts[0], name))
+                # 存储歌词文件的完整路径，避免后续 open 时因工作目录不同导致找不到文件
+                lyric_files.append((parts[0], os.path.join(playpath, name)))
             if os.path.isdir(os.path.join(playpath, name)):
                 if name in ["lyrics", "Lyrics", "LYRICS", "歌词", "LYRIC", "Lyric"]:
                     lyric_dir = os.path.join(playpath, name)  # 歌词目录的完整路径
@@ -409,24 +471,45 @@ class MusicPlayer(QWidget):
         self.playlist = [file[0] for file in music_files]
             
         
-    def load_music_playlist(self):
-        config_path = "config.ini"
-        if not os.path.exists(config_path):
+    def load_music_playlist(self):#修改json
+        # 使用 JSON 配置文件（config.json）存储 music_path
+        config_file = Path('config.json')
+
+        # 如果配置文件不存在，弹窗让用户选择音乐目录并创建配置文件
+        if not config_file.exists():
             music_path = QFileDialog.getExistingDirectory(self, "请选择音乐文件夹（第一次启动配置）")
-            with open(config_path, 'w') as file:
-                file.write(music_path)
-        
-        with open(config_path, 'r') as f:
-            playpath = f.read()
-            
+            if not music_path:
+                # 用户取消选择，弹出警告并返回
+                QMessageBox.warning(self, "警告", "未选择音乐文件夹，程序将无法加载播放列表")
+                return
+            cfg = {"music_path": music_path}
+            try:
+                with config_file.open('w', encoding='utf-8') as f:
+                    json.dump(cfg, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                print(f"[warn] 写入配置文件失败: {e}")
+
+        # 读取配置
+        try:
+            with config_file.open('r', encoding='utf-8') as f:
+                cfg = json.load(f)
+                playpath = cfg.get('music_path', '').strip()
+        except Exception:
+            playpath = ''
+
         try:
             # 创建包含文件名和创建时间的列表
             self.init_playlist(playpath)
         except FileNotFoundError:
             QMessageBox.warning(self, "警告", "路径不存在")
             music_path = QFileDialog.getExistingDirectory(self, "请选择音乐文件夹")
-            with open(config_path, 'w') as file:
-                file.write(music_path)
+            if not music_path:
+                return
+            try:
+                with config_file.open('w', encoding='utf-8') as f:
+                    json.dump({"music_path": music_path}, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                print(f"[warn] 写入配置文件失败: {e}")
             self.init_playlist(music_path)
             
         self.update_list_widget()
@@ -513,6 +596,16 @@ class MusicPlayer(QWidget):
             msg_box.setStandardButtons(QMessageBox.Ok)
             msg_box.setModal(True)
             msg_box.exec_()'''
+    def _on_play_pressed(self, sender, args):
+        if not self.is_playing:
+            self.play_music()
+    def _on_pause_pressed(self, sender, args):
+        if self.is_playing:
+            self.toggle_play_pause()
+    def _on_next_pressed(self, sender, args):
+        self.next_song()
+    def _on_previous_pressed(self, sender, args):
+        self.prev_song()
     def get_lyrics_on_file(self,path):
         path=path.replace(".mp3","")
         for i in range(len(lyric_files)):
@@ -545,7 +638,7 @@ class MusicPlayer(QWidget):
         """
         快速版本：使用预计算和批量操作
         """
-        # 打开和预处理图片（同上）
+        # 打开和预处理图片
         if isinstance(image_data, str):
             img = Image.open(image_data)
         elif isinstance(image_data, bytes):
@@ -554,52 +647,40 @@ class MusicPlayer(QWidget):
             img = image_data
         else:
             raise ValueError("不支持的图片数据类型")
-        
+
         if img.mode != 'RGBA':
             img = img.convert('RGBA')
-        
-        img = img.resize(output_size, Image.Resampling.LANCZOS)
-        
-        # 使用更高效的方法：一次性处理所有条带
-        width, height = img.size
-        
-        # 预计算所有模糊半径
-        num_strips = 30  # 减少条带数量提高速度
-        strip_width = width // num_strips
-        
-        result_strips = []
-        for i in range(num_strips):
-            start_x = i * strip_width
-            end_x = (i + 1) * strip_width if i < num_strips - 1 else width
-            
-            progress = start_x / width
-            blur_radius = max(0.5, 8 * (1 - progress))  # 降低最大模糊半径
-            
-            strip = img.crop((start_x, 0, end_x, height))
-            
-            if blur_radius > 0.5:
-                # 使用更快的模糊方法
-                blurred_strip = strip.filter(ImageFilter.GaussianBlur(blur_radius))
-            else:
-                blurred_strip = strip
-            
-            result_strips.append(blurred_strip)
-        
-        # 合并所有条带
-        result = Image.new('RGBA', (width, height))
-        x_offset = 0
-        for strip in result_strips:
-            result.paste(strip, (x_offset, 0))
-            x_offset += strip.width
 
-        # 添加从左到右的 alpha 渐变：左侧完全透明（0%），在宽度的70%处达到完全不透明（100%），之后保持不透明
+        img = img.resize(output_size, Image.Resampling.LANCZOS)
+        width, height = img.size
+
         try:
+            # 生成两层不同强度的模糊图像
+            blurred_strong = img.filter(ImageFilter.GaussianBlur(30))
+            blurred_weak = img.filter(ImageFilter.GaussianBlur(1))
+
+            # 转为 numpy 数组并归一化到 [0,1]
+            arr_strong = np.asarray(blurred_strong).astype(np.float32) / 255.0
+            arr_weak = np.asarray(blurred_weak).astype(np.float32) / 255.0
+
+            # 根据 x 位置创建平滑的混合权重：左侧权重靠近 1（更模糊），右侧靠近 0（更清晰）
+            xs = np.linspace(0.0, 1.0, width, dtype=np.float32)
+            # progress 为 0->1，从左到右；我们希望左侧更模糊，所以 weight_strong = 1 - progress
+            weight_strong = (1.0 - xs).reshape((1, width, 1))
+
+            # 将权重扩展到高度并混合两幅图像
+            weight_strong = np.repeat(weight_strong, height, axis=0)
+            arr_blended = arr_strong * weight_strong + arr_weak * (1.0 - weight_strong)
+
+            # 转回 uint8 图像
+            arr_out = np.clip(arr_blended * 255.0, 0, 255).astype(np.uint8)
+            result = Image.fromarray(arr_out, mode='RGBA')
+
+            # 添加从左到右的 alpha 渐变：左侧完全透明（0%），在宽度的70%处达到完全不透明（100%），之后保持不透明
             gradient_end = int(width * 0.7)
             if gradient_end <= 0:
-                # 退化情况：直接全不透明
                 mask = Image.new('L', (width, height), 255)
             else:
-                # 先创建 1px 高度的水平渐变，再放大到目标高度，提高效率
                 row = Image.new('L', (width, 1))
                 for x in range(width):
                     if x <= gradient_end:
@@ -609,16 +690,34 @@ class MusicPlayer(QWidget):
                     row.putpixel((x, 0), alpha)
                 mask = row.resize((width, height), Image.Resampling.BILINEAR)
 
-            # 将 mask 作为 alpha 通道设置到结果图片
             result.putalpha(mask)
+            return result
         except Exception as e:
-            # 如果渐变出错，不影响图片本身，仅记录警告并返回原图
-            print(f"[warn] apply alpha gradient failed: {e}")
-
-        return result
+            # 退回到简单的整体模糊并添加 alpha 渐变，保证不会抛出
+            print(f"[warn] smooth blur failed, fallback: {e}")
+            try:
+                fallback = img.filter(ImageFilter.GaussianBlur(6))
+                gradient_end = int(width * 0.7)
+                if gradient_end <= 0:
+                    mask = Image.new('L', (width, height), 255)
+                else:
+                    row = Image.new('L', (width, 1))
+                    for x in range(width):
+                        if x <= gradient_end:
+                            alpha = int((x / gradient_end) * 255)
+                        else:
+                            alpha = 255
+                        row.putpixel((x, 0), alpha)
+                    mask = row.resize((width, height), Image.Resampling.BILINEAR)
+                fallback.putalpha(mask)
+                return fallback
+            except Exception:
+                return img
     def play_songs(self):
         global lyrics_lines,lyrics
         if 0 <= self.current_index < len(self.playlist):
+            self.artist=""
+            self.title=""
             music_folder = self.get_playpath()
             current_song = os.path.join(music_folder, self.playlist[self.current_index])
             print(f"正在播放: {current_song}")
@@ -659,13 +758,27 @@ class MusicPlayer(QWidget):
             
             if pygame.mixer.music.get_busy():
                 pygame.mixer.music.stop()
-            
+            try:
+                self.title=audio["TIT2"][0]
+            except:
+                pass
+            try:
+                self.artist="&".join(audio["TPE1"])
+            except:
+                pass
+            if self.title=="":
+                    self.title=self.playlist[self.current_index].split("-")[0]
+            if self.artist=="":
+                    self.title=self.playlist[self.current_index].split("-")[1]
             pygame.mixer.music.load(current_song)
             pygame.mixer.music.play()
             self.is_playing = True
             self.play_button.setText("暂停")  
             self.list_widget.setCurrentRow(self.current_index)
-            
+            try:
+                self.update_smtc(self.title, self.artist,album_image_original)
+            except:
+                pass
             # 重置乐时长，让refresh_ui重新计算
             self.music_long = 0
             
@@ -676,6 +789,7 @@ class MusicPlayer(QWidget):
             
         '''try:'''
         self.play_songs()
+        self._smtc.playback_status = winsdk.windows.media.MediaPlaybackStatus.PLAYING
         lyric_index = 0
         '''except Exception as e:
             for i in range(5):
@@ -697,8 +811,13 @@ class MusicPlayer(QWidget):
                 msg_box.exec_()'''
 
     def get_playpath(self):
-        with open('config.ini', 'r') as f:
-            return f.read().strip()
+        config_file = Path('config.json')
+        try:
+            with config_file.open('r', encoding='utf-8') as f:
+                cfg = json.load(f)
+                return cfg.get('music_path', '').strip()
+        except Exception:
+            return ''
     def parse_lrc(self,lrc_content: str):
         """
         解析LRC文件格式
@@ -778,10 +897,12 @@ class MusicPlayer(QWidget):
             pygame.mixer.music.pause()
             self.is_playing = False
             self.play_button.setText("播放")  # 修复按钮文字显示
+            self._smtc.playback_status = winsdk.windows.media.MediaPlaybackStatus.PAUSED
         else:
             pygame.mixer.music.unpause()
             self.is_playing = True
             self.play_button.setText("暂停")  # 修复按钮文字显示
+            self._smtc.playback_status = winsdk.windows.media.MediaPlaybackStatus.PLAYING
 
     def prev_song(self):
         global c
@@ -802,12 +923,112 @@ class MusicPlayer(QWidget):
         self.play_music()
 
     def hide_show_window(self):
+        # 使用滑动动画从屏幕左侧显示/隐藏窗口
+        try:
+            screen = QApplication.primaryScreen().availableGeometry()
+        except Exception:
+            screen = QApplication.desktop().availableGeometry()
+
+        win_w = self.width()
+        win_h = self.height()
+        screen_right = screen.x() + screen.width()
+
+        # 目标显示位置：靠近屏幕左侧，离边缘10像素
+        on_x = max(screen.x(), screen.x())
+        # 隐藏时移动到屏幕外右侧
+        off_x = screen.x() - win_w - 20
+
+        current_y = self.y()
+
+        # 如果正在执行动画，则忽略额外请求
+        if getattr(self, '_anim_running', False):
+            return
+
+        # 显示窗口（从屏外滑入并淡入）
         if self.show_flag == 0:
+            # 记录上次目标位置以便隐藏后恢复
+            self._last_pos = QPoint(on_x, current_y)
+            # 先将窗口放到屏幕外右侧，然后 show()
+            self.move(off_x, current_y)
+            # 先把窗口透明度置为0以便淡入
+            try:
+                self.setWindowOpacity(0.0)
+            except Exception:
+                pass
             self.show()
-            self.show_flag = 1
+
+            # 位置动画
+            anim_pos = QPropertyAnimation(self, b"pos")
+            anim_pos.setDuration(350)
+            anim_pos.setStartValue(QPoint(off_x, current_y))
+            anim_pos.setEndValue(QPoint(on_x, current_y))
+            anim_pos.setEasingCurve(QEasingCurve.OutCubic)
+
+            # 透明度动画（淡入）
+            anim_opacity = QPropertyAnimation(self, b"windowOpacity")
+            anim_opacity.setDuration(350)
+            anim_opacity.setStartValue(0.0)
+            anim_opacity.setEndValue(1.0)
+            anim_opacity.setEasingCurve(QEasingCurve.OutCubic)
+
+            # 并行动画组
+            group = QParallelAnimationGroup(self)
+            group.addAnimation(anim_pos)
+            group.addAnimation(anim_opacity)
+
+            def on_finished_show():
+                self._anim_running = False
+                self._anim = None
+                self._anim_group = None
+                self.show_flag = 1
+
+            self._anim_running = True
+            self._anim = anim_pos
+            self._anim_group = group
+            group.finished.connect(on_finished_show)
+            group.start()
         else:
-            self.hide()
-            self.show_flag = 0
+            # 隐藏窗口（向屏外滑出并淡出）
+            start_x = self.x()
+            anim_pos = QPropertyAnimation(self, b"pos")
+            anim_pos.setDuration(300)
+            anim_pos.setStartValue(QPoint(start_x, current_y))
+            anim_pos.setEndValue(QPoint(off_x, current_y))
+            anim_pos.setEasingCurve(QEasingCurve.InCubic)
+
+            # 透明度动画（淡出）
+            anim_opacity = QPropertyAnimation(self, b"windowOpacity")
+            anim_opacity.setDuration(300)
+            # 从当前不透明值开始到 0
+            try:
+                current_op = self.windowOpacity()
+            except Exception:
+                current_op = 1.0
+            anim_opacity.setStartValue(current_op)
+            anim_opacity.setEndValue(0.0)
+            anim_opacity.setEasingCurve(QEasingCurve.InCubic)
+
+            group = QParallelAnimationGroup(self)
+            group.addAnimation(anim_pos)
+            group.addAnimation(anim_opacity)
+
+            def on_finished_hide():
+                self._anim_running = False
+                self.hide()
+                # 恢复不透明度，便于下次显示时先设置为0再播放淡入动画
+                try:
+                    self.setWindowOpacity(1.0)
+                except Exception:
+                    pass
+                self._anim = None
+                self._anim_group = None
+                self.show_flag = 0
+
+            self._anim_running = True
+            self._anim = anim_pos
+            self._anim_group = group
+            group.finished.connect(on_finished_hide)
+            group.start()
 
     def start_progress_update(self):
         update_thread = threading.Thread(target=self.update_progress)
@@ -857,35 +1078,38 @@ class MusicPlayer(QWidget):
 
     def refresh_ui(self):
             global lyric_index
-            if self.is_playing and pygame.mixer.music.get_busy() and self.playlist:
-                a = pygame.mixer.music.get_pos()
-                current_pos = a + c
-                lyric_index=bisect.bisect_left(lyrics,current_pos)-1
-                self.lyric_view.setCurrentRow(lyric_index)
-                self.lyric_view.scrollToItem(self.lyric_view.item(lyric_index))
+            try:
+                if self.is_playing and pygame.mixer.music.get_busy() and self.playlist:
+                    a = pygame.mixer.music.get_pos()
+                    current_pos = a + c
+                    lyric_index=bisect.bisect_left(lyrics,current_pos)-1
+                    self.lyric_view.setCurrentRow(lyric_index)
+                    self.lyric_view.scrollToItem(self.lyric_view.item(lyric_index))
 
-                # 确保current_pos不超过总时长
-                if self.music_long > 0 and current_pos > self.music_long:
-                    current_pos = self.music_long
-                
-                # 发送信号到主线程更新UI（关键修复：确保信号持续发射）
-                self.update_ui_signal.emit(current_pos, self.music_long)
-                
-                # 首次获取总时长
-                if self.music_long == 0:
-                    try:
-                        music_folder = self.get_playpath()
-                        current_song = os.path.join(music_folder, self.playlist[self.current_index])
-                        audio = pygame.mixer.Sound(current_song)
-                        self.music_long = int(audio.get_length() * 1000)
-                        # 立即发送一次信号，确保总时长显示
-                        self.update_ui_signal.emit(current_pos, self.music_long)
-                    except Exception as e:
-                        print(f"[warn] 获取音乐时长失败: {str(e)}")
-            elif self.is_playing and not pygame.mixer.music.get_busy():
-                # 播放结束但未切换歌曲时，强制更新进度条到100%
-                if self.music_long > 0:
-                    self.update_ui_signal.emit(self.music_long, self.music_long)
+                    # 确保current_pos不超过总时长
+                    if self.music_long > 0 and current_pos > self.music_long:
+                        current_pos = self.music_long
+                    
+                    # 发送信号到主线程更新UI（关键修复：确保信号持续发射）
+                    self.update_ui_signal.emit(current_pos, self.music_long)
+                    
+                    # 首次获取总时长
+                    if self.music_long == 0:
+                        try:
+                            music_folder = self.get_playpath()
+                            current_song = os.path.join(music_folder, self.playlist[self.current_index])
+                            audio = pygame.mixer.Sound(current_song)
+                            self.music_long = int(audio.get_length() * 1000)
+                            # 立即发送一次信号，确保总时长显示
+                            self.update_ui_signal.emit(current_pos, self.music_long)
+                        except Exception as e:
+                            print(f"[warn] 获取音乐时长失败: {str(e)}")
+                elif self.is_playing and not pygame.mixer.music.get_busy():
+                    # 播放结束但未切换歌曲时，强制更新进度条到100%
+                    if self.music_long > 0:
+                        self.update_ui_signal.emit(self.music_long, self.music_long)
+            except:
+                pass
     lyric_index=0
     def update_ui_handler(self, current_pos, total_pos):
         global lyric_index
