@@ -15,7 +15,7 @@ from pathlib import Path
 from PyQt5.QtWidgets import (QApplication, QLineEdit, QWidget, QCheckBox, 
                             QVBoxLayout, QHBoxLayout, QPushButton, QListWidget, 
                             QLabel, QFileDialog, QMessageBox, QProgressBar, 
-                            QGraphicsDropShadowEffect)
+                            QGraphicsDropShadowEffect,QSplitter)
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QPoint, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
 from PyQt5.QtGui import QColor,QPixmap, QIcon
 import keyboard
@@ -77,7 +77,7 @@ class MusicPlayer(QWidget):
         # 设置窗口效果
         self.windowEffect = WindowEffect()
         self.setAttribute(Qt.WA_NoSystemBackground)
-        
+        self.window_position="left"
         # 更新UI主题
         self.update_ui_theme()
         
@@ -134,50 +134,48 @@ class MusicPlayer(QWidget):
         self.close()
     
     def init_ui(self):
+        self.primary_screen = QApplication.primaryScreen().availableGeometry()
         self.setWindowTitle("音乐播放器")
-        
-        _main_layout = QHBoxLayout(self)
+        self.resize(700, 230)
+        # 主布局（水平布局，管理整个窗口）
+        _main_layout = QHBoxLayout(self)  # 绑定到主窗口，无需再调用setLayout
+        # 去掉顶层布局默认的内边距和间距，避免列表顶部出现不必要的空隙
+        _main_layout.setContentsMargins(10, 10, 10, 10)
+        _main_layout.setSpacing(0)
 
-        main_layout = QVBoxLayout(self)
-        _main_layout.addLayout(main_layout)
+        # ---------------------- 左侧容器（包含列表、按钮、进度条） ----------------------
+        self.left_widget = QWidget(self)  # 左侧容器，父对象为主窗口
+        left_layout = QVBoxLayout(self.left_widget)  # 左侧容器的布局（垂直）
+        # 左侧布局也清除内边距，让列表紧贴顶部
+        left_layout.setContentsMargins(5, 0, 0, 0)
 
-        self.image_label=QLabel("",self)
-        self.image_label.setFixedSize(230, 230)
-        self.image_label.move(470,0)
-
-        self.list_widget = QListWidget(self)
+        # 1.1 歌曲列表
+        self.list_widget = QListWidget(self.left_widget)  # 父对象设为left_widget，确保被其布局管理
         self.list_widget.itemClicked.connect(self.play_selected_song)
-        main_layout.addWidget(self.list_widget)
+        left_layout.addWidget(self.list_widget)  # 加入左侧布局
 
+        # 1.2 按钮区域（水平布局）
         button_layout = QHBoxLayout()
-
-        self.play_button = QPushButton("播放", self)
+        self.play_button = QPushButton("播放", self.left_widget)
         self.play_button.clicked.connect(self.toggle_play_pause)
         button_layout.addWidget(self.play_button)
 
-        self.hide_show_button = QPushButton("隐藏/显示", self)
+        self.hide_show_button = QPushButton("隐藏/显示", self.left_widget)
         self.hide_show_button.clicked.connect(self.hide_show_window)
         button_layout.addWidget(self.hide_show_button)
 
-        self.move_button = QPushButton("滚动到当前播放", self)
-        self.move_button.clicked.connect(self.to_now_playing)
+        self.move_button = QPushButton("滚动到当前播放", self.left_widget)
         button_layout.addWidget(self.move_button)
 
-        self.search_button = QPushButton("搜索", self)
+        self.search_button = QPushButton("搜索", self.left_widget)
         self.search_button.clicked.connect(self.search)
         button_layout.addWidget(self.search_button)
+        left_layout.addLayout(button_layout)  # 按钮布局加入左侧布局
 
-        main_layout.addLayout(button_layout)
-
-        self.lyric_view = QListWidget(self)
-        _main_layout.addWidget(self.lyric_view)
-    
+        # 1.3 进度条区域（水平布局）
         progress_layout = QHBoxLayout()
-
-
-        self.now_time_label = QLabel("00:00", self)
-        self.now_time_label.setStyleSheet("color: white; font-weight: bold;")
-        # 添加阴影效果
+        self.now_time_label = QLabel("00:00", self.left_widget)
+        # 添加阴影（保持原有）
         shadow1 = QGraphicsDropShadowEffect()
         shadow1.setBlurRadius(10)
         shadow1.setXOffset(2)
@@ -186,16 +184,13 @@ class MusicPlayer(QWidget):
         self.now_time_label.setGraphicsEffect(shadow1)
         progress_layout.addWidget(self.now_time_label)
 
-        self.progress_bar = QProgressBar(self)
-        self.progress_bar.setFixedWidth(400)
+        self.progress_bar = QProgressBar(self.left_widget)
         self.progress_bar.setTextVisible(False)
-        # 允许进度条接收鼠标点击事件
         self.progress_bar.mousePressEvent = self.progress_bar_clicked
         progress_layout.addWidget(self.progress_bar)
 
-        self.total_time_label = QLabel("00:00", self)
+        self.total_time_label = QLabel("00:00", self.left_widget)
         self.total_time_label.setStyleSheet("color: white; font-weight: bold;")
-        # 添加阴影效果
         shadow2 = QGraphicsDropShadowEffect()
         shadow2.setBlurRadius(10)
         shadow2.setXOffset(2)
@@ -203,10 +198,51 @@ class MusicPlayer(QWidget):
         shadow2.setColor(QColor(0, 0, 0, 180))
         self.total_time_label.setGraphicsEffect(shadow2)
         progress_layout.addWidget(self.total_time_label)
+        left_layout.addLayout(progress_layout)  # 进度条布局加入左侧布局
 
-        main_layout.addLayout(progress_layout)
 
-        self.setLayout(main_layout)
+        # ---------------------- 右侧歌词视图 ----------------------
+        self.lyric_view = QListWidget(self)  # 父对象为主窗口
+        # 清除歌词视图额外边距，避免顶部留下空白
+        self.lyric_view.setContentsMargins(2,0,0,0)
+
+
+        self.splitter = QSplitter(Qt.Horizontal)  # 水平分割
+        self.splitter.setHandleWidth(5)
+        self.splitter.addWidget(self.left_widget)  # 左侧容器加入分割器
+        self.splitter.addWidget(self.lyric_view)   # 歌词视图加入分割器
+        self.splitter.setSizes([700, 300])
+        self.splitter.setContentsMargins(2,0, 2, 0)
+
+
+        # ---------------------- 封面图片（最右侧） ----------------------
+        self.image_label = QLabel(self)  # 父对象为主窗口
+        self.image_label.setFixedSize(230, 230)  # 固定尺寸
+        self.image_label.move(470,0) 
+        self.baseboard=QLabel(self)
+        self.baseboard.setFixedSize(470,230)
+        self.baseboard.move(0,0) 
+        baseimage = Image.new("RGBA", (470, 230), (0, 0, 0, 1))
+        try:
+            buf = io.BytesIO()
+            baseimage.save(buf, format='PNG')
+            data = buf.getvalue()
+            pix = QPixmap()
+            if pix.loadFromData(data):
+                self.baseboard.setPixmap(pix)
+            else:
+                # 回退：设置为空（避免抛错）
+                self.baseboard.clear()
+        except Exception as e:
+            print(f"[warn] baseboard image -> pixmap failed: {e}")
+            try:
+                self.baseboard.clear()
+            except:
+                pass
+
+        _main_layout.addWidget(self.splitter)  # 分割器（左侧+歌词）加入主布局
+
+        # 关键：无需调用self.setLayout(_main_layout)，因为_main_layout创建时已绑定self
     def update_smtc(self, song_name, artist, cover_bytes):
         self._smtc_updater.type = winsdk.windows.media.MediaPlaybackType.MUSIC
         self._smtc_updater.music_properties.title = song_name
@@ -301,7 +337,16 @@ class MusicPlayer(QWidget):
                 background-color: rgba(80, 80, 80, 80);
             }}
         """)
-        
+        self.splitter.setStyleSheet(f"""
+            QSplitter::handle {{
+                background-color: rgba(0, 0, 0,0);
+            }}
+            QSplitter::handle:hover {{
+                background-color: rgba(0,0,255,255);
+                width: 5px;
+                height:5px;
+            }}
+        """)
         # 滚动条样式
         scroll_style = f"""
             QScrollBar:vertical {{
@@ -607,13 +652,48 @@ class MusicPlayer(QWidget):
     def _on_previous_pressed(self, sender, args):
         self.prev_song()
     def get_lyrics_on_file(self,path):
-        path=path.replace(".mp3","")
-        for i in range(len(lyric_files)):
-                if path.split("\\")[-1].replace(".mp3","")==lyric_files[i][1].split("\\")[-1].replace(".lrc",""):
-                    with open(lyric_files[i][1], encoding='utf-8') as file:
-                        lyrics_f = file.read()
+        """
+        从本地 .lrc 文件读取歌词，支持多编码回退以避免 UnicodeDecodeError。
+        根据传入的音乐文件路径匹配歌词文件名（不含扩展名）。
+        返回字符串（读取失败返回 None）。
+        """
+        path_no_ext = path.replace('.mp3', '')
+
+        for entry in lyric_files:
+            # lyric_files 中存储为 (name_without_ext, full_path)
+            try:
+                lyric_path = entry[1]
+            except Exception:
+                continue
+
+            # 使用 os.path 进行更健壮的文件名比较
+            if os.path.splitext(os.path.basename(path_no_ext))[0] == os.path.splitext(os.path.basename(lyric_path))[0]:
+                try:
+                    with open(lyric_path, 'rb') as f:
+                        raw = f.read()
+
+                    # 依次尝试常见编码
+                    for enc in ('utf-8-sig', 'utf-8', 'gbk', 'gb2312', 'cp1252', 'latin-1', 'utf-16'):
+                        try:
+                            lyrics_f = raw.decode(enc)
+                            print(lyrics_f)
+                            return lyrics_f
+                        except Exception:
+                            continue
+
+                    # 最后保底：使用 replace 模式避免抛出
+                    try:
+                        lyrics_f = raw.decode('utf-8', errors='replace')
                         print(lyrics_f)
                         return lyrics_f
+                    except Exception as e:
+                        print(f"[warn] 最终解码失败: {lyric_path} -> {e}")
+                        return None
+                except Exception as e:
+                    print(f"[warn] 读取歌词失败: {lyric_path} -> {e}")
+                    return None
+
+        return None
             
     def get_lyrics(self, path):
         try:
@@ -722,11 +802,15 @@ class MusicPlayer(QWidget):
             current_song = os.path.join(music_folder, self.playlist[self.current_index])
             print(f"正在播放: {current_song}")
             lyrics = self.get_lyrics(current_song)
-            lyrics_lines = lyrics.split("\n")
+            if lyrics==None:
+                lyrics=[]
+            else:
+                lyrics_lines = lyrics.split("\n")
             self.lyric_view.clear()
             lyrics,lyric_list=self.parse_lrc(lyrics)
             #这里放置图片
             audio=ID3(current_song)
+            album_image_original=None
             try:
                     for tag in audio.values():
                         if isinstance(tag, APIC):
@@ -766,15 +850,20 @@ class MusicPlayer(QWidget):
                 self.artist="&".join(audio["TPE1"])
             except:
                 pass
-            if self.title=="":
-                    self.title=self.playlist[self.current_index].split("-")[0]
-            if self.artist=="":
-                    self.title=self.playlist[self.current_index].split("-")[1]
+            try:
+                if self.title=="":
+                        self.title=self.playlist[self.current_index].split("-")[0]
+                if self.artist=="":
+                        self.title=self.playlist[self.current_index].split("-")[1].split(".")[0]
+            except:
+                self.title=self.playlist[self.current_index].split(".")[0]
             pygame.mixer.music.load(current_song)
             pygame.mixer.music.play()
             self.is_playing = True
             self.play_button.setText("暂停")  
             self.list_widget.setCurrentRow(self.current_index)
+            if album_image_original==None:
+                album_image_original=b""
             try:
                 self.update_smtc(self.title, self.artist,album_image_original)
             except:
@@ -829,6 +918,8 @@ class MusicPlayer(QWidget):
             Tuple[List[int], List[str]]: (时间列表(毫秒), 歌词列表)
         """
         # 存储解析结果
+        if lrc_content==[]:
+            return [],[]
         time_list = []
         lyric_list = []
         
@@ -924,20 +1015,12 @@ class MusicPlayer(QWidget):
 
     def hide_show_window(self):
         # 使用滑动动画从屏幕左侧显示/隐藏窗口
-        try:
-            screen = QApplication.primaryScreen().availableGeometry()
-        except Exception:
-            screen = QApplication.desktop().availableGeometry()
-
-        win_w = self.width()
-        win_h = self.height()
-        screen_right = screen.x() + screen.width()
-
-        # 目标显示位置：靠近屏幕左侧，离边缘10像素
-        on_x = max(screen.x(), screen.x())
-        # 隐藏时移动到屏幕外右侧
-        off_x = screen.x() - win_w - 20
-
+        if self.window_position=="left":
+            on_x=self.primary_screen.x()
+            off_x=self.primary_screen.x()-self.width()
+        else:
+            on_x=self.primary_screen.width()-self.width()
+            off_x=self.primary_screen.width()
         current_y = self.y()
 
         # 如果正在执行动画，则忽略额外请求
@@ -1067,9 +1150,13 @@ class MusicPlayer(QWidget):
         if event.button() == Qt.LeftButton:
             # 检查鼠标点击的位置是否在子控件上
             child = self.childAt(event.pos())
-            if not child:  # 只有当点击的不是子控件时才允许拖动
+            # 始终接受事件，防止事件透传到窗口下方的其他应用
+            event.accept()
+
+            # 只有在点击空白区或非交互性的 QLabel（例如背景/baseboard）时允许拖动
+            if (child is None) or isinstance(child, QLabel) or child == getattr(self, 'baseboard', None):
                 self.drag_position = event.globalPos() - self.frameGeometry().topLeft()
-                event.accept()
+                return
 
     def mouseMoveEvent(self, event):
         if hasattr(self, 'drag_position') and event.buttons() == Qt.LeftButton:
@@ -1108,6 +1195,24 @@ class MusicPlayer(QWidget):
                     # 播放结束但未切换歌曲时，强制更新进度条到100%
                     if self.music_long > 0:
                         self.update_ui_signal.emit(self.music_long, self.music_long)
+                #判断窗口是否超出屏幕
+                if self.pos().x()<=((self.primary_screen.width()-self.primary_screen.x())-self.width())/2:
+                    self.window_position="left"
+                    if self.pos().y()<self.primary_screen.y():
+                        self.move(self.primary_screen.x(),self.primary_screen.y())
+                    if self.pos().y()+self.height()>self.primary_screen.y()+self.primary_screen.height():
+                        self.move(self.primary_screen.x(),self.primary_screen.y()+self.primary_screen.height()-self.height())
+                    else:
+                        self.move(self.primary_screen.x(),self.pos().y())
+                if self.pos().x()>(self.primary_screen.width()-self.primary_screen.x()-self.width())/2:
+                    self.window_position="right"
+                    if self.pos().y()<self.primary_screen.y():
+                        self.move(self.primary_screen.width()-self.width()+self.primary_screen.x(),self.primary_screen.y())
+                    if self.pos().y()+self.height()>self.primary_screen.y()+self.primary_screen.height():
+                        self.move(self.primary_screen.width()-self.width()+self.primary_screen.x(),self.primary_screen.y()+self.primary_screen.height()-self.height())
+                    else:
+                        self.move(self.primary_screen.width()-self.width()+self.primary_screen.x(),self.pos().y())
+                
             except:
                 pass
     lyric_index=0
